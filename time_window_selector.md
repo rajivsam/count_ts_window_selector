@@ -1,4 +1,4 @@
-# Project Proposal: Selecting Time Windows for Count Time Series
+# Selecting Time Windows for Count Time Series
 
 ## Scope of the Current Iteration
 
