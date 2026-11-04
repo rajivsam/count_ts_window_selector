@@ -100,8 +100,43 @@ The package should process an input time series of arrivals in the following ord
    - `fano_upper`, computed from the chi-square-based confidence limits.
 7. If no candidate window satisfies the Poisson-within-confidence-interval criterion, report that no window could be found.
 
-The confidence interval should be configurable by the user and expressed as a probability such as 0.90 for a 90% confidence interval. The package should use the configured confidence level to define the lower and upper Fano-factor bounds for acceptance. If the Fano factor is inside this interval, the window is considered statistically consistent with Poisson behavior under the chosen confidence level.
+The confidence interval should be configurable by the user and expressed as a probability such as 0.90 for a 90% confidence interval. The package should use the configured confidence level to compute chi-square limits around the Poisson reference value 1.
 
+## Daily Window Table Requirement
+
+A separate reporting function is required to build a tabular export of counts by day and by sub-day window. This export must be based on the underlying timestamp data rather than on a pre-aggregated count series.
+
+The procedure should be:
+
+1. Read the timestamp CSV and identify the first and last calendar dates present in the dataset.
+2. Start with the first full day of data and end with the last full day of data.
+3. Omit any partial leading or trailing day at the beginning or end of the record set and report those omitted intervals in the function output metadata.
+4. Use a user-specified window width, expressed in hours, to split each full day into evenly spaced contiguous windows.
+5. For each full day, aggregate the event counts into one column per window segment, resulting in a table with one row per day and one column per within-day window.
+6. The written dataset should have hourly arrivals as the counted values, with columns named according to the within-day window index (for example `window_00`, `window_01`, …), and the first column should be the date label.
+7. The function should accept the dataset file location and default to the repository `data/` directory when no file path is supplied.
+8. The output should make it clear which full-day range is included and which partial day segments were omitted because full-day information is not available.
+
+This table is intended for day-by-day operational reporting and planning analyses, where a user has already selected a defensible window width from the candidate-window analysis.
+
+## TSEDA Export Requirement
+
+A second export function is required for a TSEDA-style time series representation. The goal is to generate a compact two-column dataset suitable for downstream intensity-based analysis.
+
+The procedure should be:
+
+1. Use the same full-day start and end bounds as the daily window table: begin at the first full day of data and end at the last full day of data.
+2. Omit any leading or trailing partial day from the export and report those omitted intervals in the metadata.
+3. Use the same user-specified window width to define the sampling period.
+4. Write a two-column CSV with the following columns:
+   - `window_start`: the timestamp marking the beginning of the window,
+   - `arrival_intensity`: the event count within that window divided by the window duration.
+5. The `arrival_intensity` value should be expressed in consistent intensity units, such as arrivals per hour, arrivals per day, or similar, depending on the selected window width.
+6. The export should explicitly report the sampling period used to construct the dataset. For example, if the window width is 2 hours, then the sampling period is 2 hours and the intensity unit should be `arrivals per hour` for a two-hour window.
+7. This method should be functionally equivalent to the daily window export in terms of data bounds, but it is meant for TSEDA-style intensity series rather than a tabular day-by-day matrix.
+8. The method should also accept the dataset file location and default to the repository `data/` directory when no file path is supplied.
+
+The TSEDA export supports downstream modeling and time-series analysis where the primary series is the observed event intensity rather than a count table indexed by day and window segment.vel to define the lower and upper Fano-factor bounds for acceptance. If the Fano factor is inside this interval, the window is considered statistically consistent with Poisson behavior under the chosen confidence level.
 This processing flow defines the intended package behavior for higher-event-rate arrival time series. It is not intended for low-event-rate or hurdle-type series, which are handled by separate modeling approaches.
 
 ## Expected Contribution

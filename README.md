@@ -43,6 +43,39 @@ results = select_time_window(counts, [2, 3, 5, 10, 15], config=config)
 print(results)
 ```
 
+## Daily tabular export
+
+```python
+from count_ts_window_selector import build_daily_window_table
+
+summary = build_daily_window_table(
+    data_file="data/london-fire-brigade_timestamp_events.csv",
+    window_size_hours=2,
+)
+print(summary["output_file"])
+print(summary["first_full_day"], summary["last_full_day"])
+print(summary["omitted_prefix"])
+print(summary["omitted_suffix"])
+```
+
+This writes a day-by-day table with one row per full calendar day and one column per selected window within the day. Partial leading or trailing days are omitted and reported in the metadata.
+
+## TSEDA-ready export
+
+```python
+from count_ts_window_selector import teseda_export
+
+summary = teseda_export(
+    data_file="data/london-fire-brigade_timestamp_events.csv",
+    window_size_hours=2,
+)
+print(summary["output_file"])
+print(summary["sampling_period"])  # 2 hours
+print(summary["intensity_unit"])  # arrivals per hour
+```
+
+This writes a two-column series in the form `window_start,arrival_intensity`, where the intensity is the count in each window divided by the selected window width. The sampling period is equal to the chosen window width and the normalized intensity is reported in per-hour units when the window is measured in hours.
+
 ## CLI
 
 ```bash

@@ -118,13 +118,27 @@ results = select_time_window(series, [1, 2, 3, 4, 6, 8, 12, 24], config=config)
 - prefer project-local imports over changing the interpreter environment unnecessarily
 - keep visual analysis concise: hourly counts plot and Fano-factor plot are the usual deliverables
 - output should focus on the Poisson-like suitability decision and recommended time window, not on raw timestamp dumps
+- when exporting daily operational tables, begin at the first full day of data and end at the last full day of data; report any omitted partial leading/trailing day in the metadata
+- when exporting TSEDA-style intensity series, use a two-column CSV of `window_start` and `arrival_intensity`, normalized by the selected window width, and explicitly include the sampling period and intensity units in the output metadata
 
 ## Quick validation commands
 ```bash
 cd /home/rajiv/programming/count_ts_window_selector
 ./.venv/bin/python - <<'PY'
-from count_ts_window_selector import WindowSelectionConfig, check_data_suitability
+from count_ts_window_selector import WindowSelectionConfig, check_data_suitability, build_daily_window_table, teseda_export
 print('project import OK')
+
+summary = build_daily_window_table(
+    data_file='data/london-fire-brigade_timestamp_events.csv',
+    window_size_hours=2,
+)
+print(summary['first_full_day'], summary['last_full_day'])
+
+summary2 = teseda_export(
+    data_file='data/london-fire-brigade_timestamp_events.csv',
+    window_size_hours=2,
+)
+print(summary2['sampling_period'], summary2['intensity_unit'])
 PY
 ```
 
