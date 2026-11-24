@@ -43,6 +43,79 @@ results = select_time_window(counts, [2, 3, 5, 10, 15], config=config)
 print(results)
 ```
 
+## Horizon-scoped analysis
+
+Timestamp data can be evaluated inside a bounded macro-horizon before applying
+the micro-window Fano analysis:
+
+```python
+from count_ts_window_selector import WindowSelectionConfig, evaluate_horizon
+
+result = evaluate_horizon(
+    "data/london-fire-brigade_timestamp_events.csv",
+    [1, 2, 3],
+    start_date="2024-01-02",
+    horizon_window="7 days",
+    base_resolution="1d",
+    boundary_policy="error",
+    config=WindowSelectionConfig(min_windows=2),
+)
+
+print(result["suitability_status"])
+print(result["accepted_windows"])
+```
+
+The extracted interval is half-open: `[start_date, start_date + horizon_window)`.
+Incomplete requested horizons raise `HorizonBoundaryError` by default. Complete
+base-resolution intervals are constructed explicitly, including zero-count
+intervals.
+
+Candidate horizon lengths can be compared by stepping through the available
+dataset:
+
+```python
+from count_ts_window_selector import WindowSelectionConfig, tune_horizon_windows
+
+summaries = tune_horizon_windows(
+    "data/london-fire-brigade_timestamp_events.csv",
+    candidate_horizons=["7 days", "14 days", "21 days"],
+    candidate_windows=[1, 2, 3],
+    step_size="1 day",
+    base_resolution="1d",
+    config=WindowSelectionConfig(min_windows=2),
+)
+```
+
+Each summary reports attempted, suitability-valid, and suitability-failed
+horizons alongside the Poisson acceptance rate. The acceptance rate is
+conditional on suitability, and is `None` when no suitable horizon exists.
+
+Apply a separate, explicit recommendation rule to the comparison table:
+
+```python
+from count_ts_window_selector import (
+    HorizonRecommendationConfig,
+    recommend_optimal_horizon,
+)
+
+recommendation = recommend_optimal_horizon(
+    summaries,
+    config=HorizonRecommendationConfig(
+        min_valid_horizon_proportion=0.80,
+        min_valid_horizons=10,
+        acceptance_rate_tolerance=0.02,
+        prefer_shorter_horizon=True,
+    ),
+)
+print(recommendation["recommended_horizon"])
+print(recommendation["candidate_audit"])
+```
+
+Tuning only compares horizons; recommendation is deliberately a separate
+stateless operation. If no candidate passes the reliability gates, the
+recommended horizon is `None` and the per-candidate audit identifies the
+failed observed-versus-required thresholds.
+
 ## Daily tabular export
 
 ```python

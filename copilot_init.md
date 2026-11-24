@@ -1,25 +1,28 @@
 # Copilot project bootstrap for count_ts_window_selector
 
 ## Project purpose
-This project evaluates timestamp event datasets and identifies a Poisson-compatible observation window using count-time-series heuristics.
+This project evaluates timestamp event datasets and identifies Poisson-compatible observation windows using horizon-scoped count-time-series diagnostics.
 
 The core package is `count_ts_window_selector`, defined in `src/count_ts_window_selector/__init__.py` and `src/count_ts_window_selector/__main__.py`.
 
 Primary workflow:
-- load a timestamp CSV with a single `timestamp` column
-- convert timestamps to hourly counts or other aggregated counts
+- load an event CSV or timestamp-indexed count series
+- extract a complete half-open macro-horizon
+- aggregate the horizon into a complete base-resolution count series, including zero intervals
 - validate data suitability for the non-hurdle Poisson workflow
-- filter candidate windows by minimum coverage (`min_windows`)
-- compute Fano factors and a chi-square confidence interval around 1
-- return candidate windows that remain compatible with Poisson behavior
+- filter candidate micro-windows by minimum coverage (`min_windows`)
+- compute sample Fano factors and chi-square confidence bands around 1
+- slide across candidate macro-horizons to compare reliability, precision, and dispersion
+- apply a separate explicit rule to recommend an optimal horizon
 
 ## Repository layout
 - `src/count_ts_window_selector/` — package implementation
 - `data/` — timestamp datasets for analysis
 - `notebooks/` — exploratory notebooks for specific datasets
 - `README.md` — project overview and usage examples
-- `time_window_selector.md` — design notes / proposal
+- `time_window_selector.md` — implementation requirements and design document
 - `pyproject.toml` — project metadata and Python dependencies
+- `tests/test_requirements.py` — focused requirement and integration tests
 
 ## Environment
 Use the project virtual environment created by uv:
@@ -42,13 +45,10 @@ uv run python ...
 ```
 
 ## Typical notebook pattern
-Notebook cells should follow this pattern when reading a dataset:
+Use package APIs instead of duplicating timestamp parsing or count aggregation:
 
 ```python
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
-import csv
 import sys
 
 ROOT = Path.cwd().resolve()
@@ -63,30 +63,15 @@ if str(ROOT / "src") not in sys.path:
 
 DATA_FILE = ROOT / "data" / "<dataset_name>.csv"
 
-timestamps = []
-with DATA_FILE.open() as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        raw = row["timestamp"]
-        if "." in raw:
-            base, frac = raw.split(".", 1)
-            raw = base + "." + frac[:6]
-        timestamps.append(datetime.strptime(raw, "%Y-%m-%d %H:%M:%S.%f"))
-```
+from count_ts_window_selector import extract_horizon
 
-Then aggregate by hour:
-
-```python
-hourly_counts = defaultdict(int)
-for dt in timestamps:
-    key = dt.replace(minute=0, second=0, microsecond=0)
-    hourly_counts[key] += 1
-
-series = [hourly_counts[k] for k in sorted(hourly_counts)]
+overview = extract_horizon(DATA_FILE, base_resolution="1d")
+series = overview["counts"]
+interval_starts = overview["interval_starts"]
 ```
 
 ## Config and usage
-The package exposes `WindowSelectionConfig` and `select_time_window`.
+`select_time_window` remains available for an already aggregated count series:
 
 ```python
 from count_ts_window_selector import WindowSelectionConfig, select_time_window
@@ -101,22 +86,89 @@ config = WindowSelectionConfig(
 results = select_time_window(series, [1, 2, 3, 4, 6, 8, 12, 24], config=config)
 ```
 
+For timestamp datasets, prefer horizon-scoped evaluation and keep tuning separate from recommendation:
+
+```python
+from count_ts_window_selector import (
+    HorizonRecommendationConfig,
+    WindowSelectionConfig,
+    evaluate_horizon,
+    recommend_optimal_horizon,
+    tune_horizon_windows,
+)
+
+config = WindowSelectionConfig(min_windows=2)
+result = evaluate_horizon(
+    "data/london-fire-brigade_timestamp_events.csv",
+    [1, 2, 3],
+    start_date="2024-01-02",
+    horizon_window="7 days",
+    base_resolution="1d",
+    boundary_policy="error",
+    config=config,
+)
+
+summaries = tune_horizon_windows(
+    "data/london-fire-brigade_timestamp_events.csv",
+    ["3 days", "7 days", "14 days", "21 days"],
+    [1, 2, 3],
+    step_size="1 day",
+    base_resolution="1d",
+    config=config,
+)
+recommendation = recommend_optimal_horizon(
+    summaries,
+    config=HorizonRecommendationConfig(
+        min_valid_horizon_proportion=0.80,
+        min_valid_horizons=10,
+        acceptance_rate_tolerance=0.02,
+        prefer_shorter_horizon=True,
+    ),
+)
+```
+
+`recommend_optimal_horizon` is intentionally a separate stateless operation. Tuning must not silently select a horizon. The recommendation returns:
+
+- `recommended_horizon`: selected `H*`, or `None`
+- `rule_config`: exact thresholds applied
+- `selected_metrics`: the complete selected tuning row
+- `candidate_audit`: selection, runner-up, or rejection details
+
 ## Data conventions
 - all timestamp datasets are a single-column CSV named like `*_timestamp_events.csv`
 - the column name is usually `timestamp`
 - values are full ISO-like timestamps with nanoseconds
-- custom parsing may be needed to normalize fractional seconds before `datetime.strptime`
+- package parsers normalize fractional seconds through microsecond precision
+- event data and pre-aggregated count data must be consistently timezone-aware or consistently timezone-naive
+- micro-window widths are positive integers in units of the configured base resolution
+
+## Horizon semantics
+- evaluation intervals are half-open: `[start_date, start_date + horizon_window)`
+- `boundary_policy="error"` is the default; incomplete horizons are not silently evaluated
+- `boundary_policy="truncate"` must retain explicit prefix/suffix truncation metadata
+- suitability is evaluated before candidate-window coverage or Fano statistics
+- base-resolution grids include zero-count intervals
+- the recommendation acceptance-rate denominator contains only suitability-valid horizons
+- report attempted, valid, and failed horizon counts beside every acceptance rate
+- when there are no suitability-valid horizons, acceptance-rate and coverage metrics must be `None`, not zero
 
 ## Expected output interpretation
 - `observed_event_rate` should be high enough to pass `min_event_rate`
 - `zero_window_proportion` should remain below `max_zero_window_proportion`
-- a 1-hour window often serves as the most defensible default if it is closest to a Fano factor of 1 while staying inside the confidence interval
+- interpret a micro-window as accepted only when its Fano factor is inside `fano_lower` and `fano_upper`
+- inspect tuning performance curves for acceptance rate, valid-horizon proportion, confidence-band width, and median dispersion deviation
+- never infer recommendation quality from acceptance rate alone; inspect valid horizon count and proportion
+- a `None` recommendation means no candidate passed the configured reliability gates
 
 ## Project-specific guidance
 - do not assume the notebook working directory is the repository root
 - when running notebooks from a nested folder, walk up parent directories until the root with `src/count_ts_window_selector` is found
 - prefer project-local imports over changing the interpreter environment unnecessarily
-- keep visual analysis concise: hourly counts plot and Fano-factor plot are the usual deliverables
+- keep visual analysis concise: base-resolution count plot, Fano diagnostics, and four horizon performance curves are the standard deliverables
+- use a base resolution appropriate for the operating process; daily resolution may be required when hourly gaps are structural
+- evaluate micro-windows inside an explicit `horizon_window` and interpret Poisson acceptance together with valid/failed horizon counts
+- keep horizon tuning separate from recommendation; apply `recommend_optimal_horizon` explicitly and inspect `candidate_audit`
+- use `min_windows=30` as the production default; lower values in short sample notebooks must be documented as exploratory exceptions
 - output should focus on the Poisson-like suitability decision and recommended time window, not on raw timestamp dumps
 - when exporting daily operational tables, begin at the first full day of data and end at the last full day of data; report any omitted partial leading/trailing day in the metadata
 - when exporting TSEDA-style intensity series, use a two-column CSV of `window_start` and `arrival_intensity`, normalized by the selected window width, and explicitly include the sampling period and intensity units in the output metadata
@@ -125,8 +177,29 @@ results = select_time_window(series, [1, 2, 3, 4, 6, 8, 12, 24], config=config)
 ```bash
 cd /home/rajiv/programming/count_ts_window_selector
 ./.venv/bin/python - <<'PY'
-from count_ts_window_selector import WindowSelectionConfig, check_data_suitability, build_daily_window_table, teseda_export
+from count_ts_window_selector import (
+    HorizonRecommendationConfig,
+    WindowSelectionConfig,
+    build_daily_window_table,
+    recommend_optimal_horizon,
+    teseda_export,
+    tune_horizon_windows,
+)
 print('project import OK')
+
+summaries = tune_horizon_windows(
+    'data/london-fire-brigade_timestamp_events.csv',
+    candidate_horizons=['3 days', '7 days', '14 days'],
+    candidate_windows=[1, 2, 3],
+    step_size='1 day',
+    base_resolution='1d',
+    config=WindowSelectionConfig(min_windows=2),
+)
+recommendation = recommend_optimal_horizon(
+    summaries,
+    config=HorizonRecommendationConfig(),
+)
+print(recommendation['recommended_horizon'])
 
 summary = build_daily_window_table(
     data_file='data/london-fire-brigade_timestamp_events.csv',
@@ -140,7 +213,9 @@ summary2 = teseda_export(
 )
 print(summary2['sampling_period'], summary2['intensity_unit'])
 PY
+
+./.venv/bin/python -m pytest -q
 ```
 
 ## Notes for future agents
-This project is intentionally about higher-event-rate count data. It is not meant for sparse or hurdle-style series; use the package only after the data-suitability screen passes.
+This project is intentionally about higher-event-rate count data. It is not meant for sparse or hurdle-style series; use the package only after the data-suitability screen passes. `tune_horizon_windows` compares horizons, while `recommend_optimal_horizon` is the only component that applies the documented selection rule.
