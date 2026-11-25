@@ -1,0 +1,47 @@
+direction: down
+
+data: {
+  label: "1  Consecutive arrival-time subsequence\n(Input)"
+  shape: cylinder
+  style.fill: "#E8F1FB"
+  style.stroke: "#2F70AF"
+}
+
+prepare: {
+  label: "2  Build complete count blocks\nRegular base grid, including zero counts\n(Processing)"
+  style.fill: "#F4F8FC"
+  style.stroke: "#2F70AF"
+}
+
+within_day: {
+  label: "3  Select candidate within-day windows W\nSuitability check → coverage → Fano test\n(Processing)"
+  style.fill: "#EAF6EA"
+  style.stroke: "#4F8A4F"
+}
+
+repeat: {
+  label: "4  Repeat across candidate horizons H\nSlide complete day blocks through the subsequence\n(Processing)"
+  style.fill: "#F0EAF8"
+  style.stroke: "#7651A8"
+}
+
+horizon: {
+  label: "5  Select a defensible day horizon H*\nRepeatability, valid-block coverage, dispersion, precision\n(Processing)"
+  style.fill: "#F0EAF8"
+  style.stroke: "#7651A8"
+}
+
+outcome: {
+  label: "6  Return H* and its accepted W candidates\nSelect one repeatable W* if required\n(Output)"
+  shape: parallelogram
+  style.fill: "#DFF3EF"
+  style.stroke: "#2C7A6B"
+  style.font-color: "#15594D"
+  style.bold: true
+}
+
+data -> prepare
+prepare -> within_day
+within_day -> repeat
+repeat -> horizon
+horizon -> outcome: if reliability gates pass

@@ -1,0 +1,70 @@
+\documentclass[border=12pt,varwidth=700pt]{standalone}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\begin{document}
+\noindent\textbf{Algorithm 1: Nested Poisson-Compatible Window Selection}\par
+\smallskip
+\hrule
+\smallskip
+\begin{algorithmic}[1]
+\Require Arrival subsequence $T$, base resolution $\Delta$
+\Require Candidate horizons $\mathcal H$ and windows $\mathcal W$
+\Require $\bar C_{\min}$, $z_{\max}$, $m_{\min}$, $1-\alpha$
+\Require Reliability gates $p_{\min}$, $v_{\min}$, and tolerance $\epsilon$
+\Ensure Recommended horizon $H^*$ and diagnostics for the accepted $W$
+
+\ForAll{$H\in\mathcal H$}
+    \State $R_H\gets0$; $V_H\gets0$; $A_H\gets0$
+    \ForAll{complete blocks $B_{H,r}$ spaced by $s_H$}
+        \State $R_H\gets R_H+1$
+        \State Construct complete base counts $C^{(H,r)}$
+        \State $\bar C\gets\operatorname{mean}(C^{(H,r)})$
+        \State $z_0\gets\operatorname{proportion}(C^{(H,r)}=0)$
+        \If{$\bar C<\bar C_{\min}$ \textbf{ or } $z_0>z_{\max}$}
+            \State Record suitability rejection
+            \State \textbf{continue}
+        \EndIf
+        \State $V_H\gets V_H+1$
+        \State $\mathcal A_{H,r}\gets\varnothing$
+        \ForAll{$W\in\mathcal W$}
+            \State Aggregate to complete counts $N_1,\ldots,N_m$
+            \If{$m<m_{\min}$}
+                \State Record coverage rejection
+                \State \textbf{continue}
+            \EndIf
+            \State $\bar N\gets\operatorname{mean}(N)$
+            \If{$\bar N=0$}
+                \State \Return error for zero aggregated mean
+            \EndIf
+            \State $S_N^2\gets\operatorname{var}(N,\mathrm{ddof}=1)$
+            \State $\widehat F_W\gets S_N^2/\bar N$
+            \State $\nu\gets m-1$
+            \State $\mathcal I\gets[\chi^2_{\alpha/2,\nu}/\nu,
+                   \chi^2_{1-\alpha/2,\nu}/\nu]$
+            \If{$\widehat F_W\in\mathcal I$}
+                \State $\mathcal A_{H,r}\gets\mathcal A_{H,r}\cup\{W\}$
+            \EndIf
+        \EndFor
+        \If{$\mathcal A_{H,r}\ne\varnothing$}
+            \State $A_H\gets A_H+1$
+        \EndIf
+    \EndFor
+    \State $P_H\gets V_H/R_H$
+    \State $Q_H\gets A_H/V_H$ if $V_H>0$, otherwise undefined
+\EndFor
+\State Remove candidates with undefined $Q_H$, $P_H<p_{\min}$, or $V_H<v_{\min}$
+\If{no candidates remain}
+    \State \Return no recommendation
+\EndIf
+\State $Q_{\max}\gets\max_H Q_H$
+\State Retain candidates with $Q_H\ge Q_{\max}-\epsilon$
+\State $H^*\gets$ lexicographic minimum by $M_H$, $\overline D_H$, and
+       configured horizon-duration preference
+\State \Return $H^*$, the accepted-window diagnostics for $H^*$, and the
+       candidate audit
+\end{algorithmic}
+\hrule
+\end{document}
