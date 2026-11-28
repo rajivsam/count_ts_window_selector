@@ -12,11 +12,14 @@ from count_ts_window_selector import (
     HorizonRecommendationConfig,
     WindowSelectionConfig,
     build_daily_window_table,
+    build_arrival_intensity_series,
     check_data_suitability,
     evaluate_horizon,
     extract_horizon,
     filter_candidate_windows,
     recommend_optimal_horizon,
+    rank_accepted_windows,
+    save_tseda_arrival_intensity_series,
     select_time_window,
     teseda_export,
     tune_horizon_windows,
@@ -153,6 +156,142 @@ def test_evaluate_horizon_returns_all_candidate_diagnostics() -> None:
         }.issubset(candidate)
         for candidate in result["candidate_windows"]
     )
+
+
+def test_full_range_evaluation_reports_mode_and_deterministic_selection() -> None:
+    start = datetime(2024, 1, 1, 9, 30)
+    daily_counts = [5, 10, 14, 7, 12, 8, 9, 7, 13, 8] * 4
+    timestamps = [
+        start + timedelta(days=day, minutes=event)
+        for day, daily_count in enumerate(daily_counts)
+        for event in range(daily_count)
+    ]
+    result = evaluate_horizon(
+        timestamps,
+        [1, 2],
+        horizon_window=None,
+        base_resolution="1d",
+        config=WindowSelectionConfig(
+            min_event_rate=1.0,
+            min_windows=10,
+            max_zero_window_proportion=0.1,
+        ),
+    )
+
+    assert result["evaluation_mode"] == "full_range"
+    assert result["horizon_window"] is None
+    assert result["is_complete"] is True
+    assert result["start_date"].endswith("T00:00:00")
+    assert result["requested_candidate_windows"] == [1, 2]
+    assert result["selected_window"] == result["ranked_accepted_windows"][0]
+
+
+def test_rank_accepted_windows_prefers_width_after_statistical_ties() -> None:
+    candidates = [
+        {"window_size": 7, "fano_factor": 1.0, "confidence_band_width": 0.5},
+        {"window_size": 1, "fano_factor": 1.0, "confidence_band_width": 0.5},
+    ]
+
+    assert rank_accepted_windows(candidates)[0]["window_size"] == 1
+    assert rank_accepted_windows(
+        candidates, prefer_shorter_window=False
+    )[0]["window_size"] == 7
+
+
+def test_full_range_intensity_series_uses_selected_window_rate() -> None:
+    start = datetime(2024, 1, 1)
+    timestamps = [
+        start + timedelta(hours=hour)
+        for hour in range(5 * 24)
+    ]
+
+    series = build_arrival_intensity_series(
+        timestamps,
+        window_size=2,
+        base_resolution="1d",
+    )
+
+    assert series["evaluation_mode"] == "full_range"
+    assert series["window_size"] == 2
+    assert series["intensity_unit"] == "arrivals per hour"
+    assert series["remainder_base_intervals"] == 1
+    assert series["number_of_complete_windows"] == 2
+    assert series["rows"][0]["window_start"] == "2024-01-01T00:00:00"
+    assert series["rows"][0]["window_midpoint"] == "2024-01-02T00:00:00"
+    assert len(series["rows"]) == 2
+
+
+def test_save_tseda_selected_window_series_uses_midpoints(tmp_path: Path) -> None:
+    start = datetime(2024, 1, 1)
+    timestamps = [
+        start + timedelta(hours=hour)
+        for hour in range(5 * 24)
+    ]
+    output_path = tmp_path / "selected_window_teseda.csv"
+
+    summary = save_tseda_arrival_intensity_series(
+        timestamps,
+        window_size=2,
+        base_resolution="1d",
+        rate_unit="day",
+        output_path=output_path,
+    )
+
+    assert summary["output_file"] == str(output_path)
+    assert summary["timestamp_coordinate"] == "window_midpoint"
+    assert summary["columns"] == ["window_midpoint", "arrival_intensity"]
+    assert summary["number_of_complete_windows"] == 2
+    assert summary["number_of_exported_rows"] == 2
+    assert summary["remainder_base_intervals"] == 1
+    rows = output_path.read_text().splitlines()
+    assert rows[0] == "window_midpoint,arrival_intensity"
+    assert rows[1].startswith("2024-01-02T00:00:00,")
+
+
+def test_save_tseda_selected_window_series_supports_two_stage_horizon(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "two_stage_selected_window_teseda.csv"
+
+    summary = save_tseda_arrival_intensity_series(
+        DATA_FILE,
+        window_size=1,
+        start_date="2024-01-02",
+        horizon_window="7 days",
+        output_path=output_path,
+        base_resolution="1d",
+        rate_unit="day",
+    )
+
+    assert summary["evaluation_mode"] == "horizon_scoped"
+    assert summary["start_date"] == "2024-01-02T00:00:00"
+    assert summary["end_date"] == "2024-01-09T00:00:00"
+    assert summary["number_of_exported_rows"] == 7
+    assert len(output_path.read_text().splitlines()) == 8
+
+
+def test_full_range_overdispersion_recommends_two_stage_analysis() -> None:
+    start = datetime(2024, 1, 1)
+    timestamps = [
+        start + timedelta(days=day)
+        for day in range(20)
+        for _ in range((day % 5) * 20 + 10)
+    ]
+    result = evaluate_horizon(
+        timestamps,
+        [1],
+        horizon_window=None,
+        base_resolution="1h",
+        config=WindowSelectionConfig(
+            min_event_rate=0.1,
+            max_zero_window_proportion=1.0,
+            min_windows=10,
+        ),
+    )
+
+    assert not result["poisson_compatible_window_found"]
+    assert result["diagnostics"]["global_non_stationarity_suspected"] is True
+    assert "two-stage workflow" in result["diagnostics"]["message"]
 
 
 def test_tuning_reports_conditional_acceptance_and_valid_coverage() -> None:

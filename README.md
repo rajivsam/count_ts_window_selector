@@ -65,6 +65,69 @@ print(result["suitability_status"])
 print(result["accepted_windows"])
 ```
 
+## Single-stage full-range analysis
+
+Set `horizon_window=None` to evaluate the complete aligned dataset range. The
+result reports the evaluation mode, retains every accepted candidate, and
+deterministically ranks them for a single selected window:
+
+```python
+from count_ts_window_selector import (
+    build_arrival_intensity_series,
+    plot_arrival_intensity,
+    save_tseda_arrival_intensity_series,
+)
+
+full_range = evaluate_horizon(
+    "data/london-fire-brigade_timestamp_events.csv",
+    [1, 2, 3, 4, 5, 7],
+    horizon_window=None,
+    base_resolution="1d",
+    config=WindowSelectionConfig(min_event_rate=1.0, min_windows=2),
+)
+
+selected = full_range["selected_window"]
+if selected is not None:
+    intensity = build_arrival_intensity_series(
+        "data/london-fire-brigade_timestamp_events.csv",
+        window_size=selected["window_size"],
+        base_resolution="1d",
+    )
+    plot_arrival_intensity(intensity)
+    export = save_tseda_arrival_intensity_series(
+        "data/london-fire-brigade_timestamp_events.csv",
+        window_size=selected["window_size"],
+        output_path="data/london_single_window_teseda.csv",
+        base_resolution="1d",
+        rate_unit="day",
+    )
+```
+
+`selected_window` is ranked by dispersion deviation from 1, confidence-band
+width, and window length. If no full-range candidate is accepted and
+overdispersion is observed, diagnostics recommend the bounded two-stage
+workflow rather than treating the failure as an invalid input.
+
+The selected-window TSEDA CSV is saved with `window_midpoint` and
+`arrival_intensity` columns. The midpoint represents the temporal center of
+each complete, non-overlapping selected window.
+
+The same export supports two-stage output: supply the selected macro-horizon's
+`start_date` and `horizon_window` along with its selected micro-window. Omit
+`horizon_window` for a full-range single-stage export.
+
+```python
+two_stage_export = save_tseda_arrival_intensity_series(
+    "data/london-fire-brigade_timestamp_events.csv",
+    window_size=1,
+    start_date="2024-01-02",
+    horizon_window="7 days",
+    output_path="data/london_two_stage_teseda.csv",
+    base_resolution="1d",
+    rate_unit="day",
+)
+```
+
 The extracted interval is half-open: `[start_date, start_date + horizon_window)`.
 Incomplete requested horizons raise `HorizonBoundaryError` by default. Complete
 base-resolution intervals are constructed explicitly, including zero-count

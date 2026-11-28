@@ -26,7 +26,7 @@ Primary workflow:
 - `data/` — timestamp datasets for analysis
 - `notebooks/` — exploratory notebooks for specific datasets
 - `README.md` — project overview and usage examples
-- `time_window_selector.md` — implementation requirements and design document
+- `time_window_selection_requirements.md` — authoritative implementation requirements and design document
 - `documentation/window_selection_algorithm_desc.md` — manuscript-oriented statistical and algorithmic description
 - `documentation/within_horizon_fano_algorithm.tex` — LaTeX `algpseudocode` source for the rendered algorithm
 - `documentation/window_selection_algorithm_process.d2` — D2 source for the process schematic
@@ -190,7 +190,7 @@ recommendation = recommend_optimal_horizon(
 - use `min_windows=30` as the production default; lower values in short sample notebooks must be documented as exploratory exceptions
 - output should focus on the Poisson-like suitability decision and recommended time window, not on raw timestamp dumps
 - when exporting daily operational tables, begin at the first full day of data and end at the last full day of data; report any omitted partial leading/trailing day in the metadata
-- when exporting TSEDA-style intensity series, use a two-column CSV of `window_start` and `arrival_intensity`, normalized by the selected window width, and explicitly include the sampling period and intensity units in the output metadata
+- when exporting a selected single-window TSEDA-style intensity series, use a two-column CSV of `window_midpoint` and `arrival_intensity`, normalized by the selected window width, and explicitly include the sampling period and intensity units in the output metadata
 
 ## Quick validation commands
 ```bash

@@ -29,6 +29,10 @@ __all__ = [
     "select_time_window",
     "extract_horizon",
     "evaluate_horizon",
+    "rank_accepted_windows",
+    "build_arrival_intensity_series",
+    "save_tseda_arrival_intensity_series",
+    "plot_arrival_intensity",
     "tune_horizon_windows",
     "recommend_optimal_horizon",
     "build_daily_window_table",
@@ -443,19 +447,41 @@ def extract_horizon(
     )
     source_start = timestamps[0]
     source_end = timestamps[-1]
-    requested_start = source_start if start_date is None else _coerce_datetime(
-        start_date,
-        parameter="start_date",
-    )
+    is_full_range = horizon_window is None
+    inferred_full_start = is_full_range and start_date is None
+    if start_date is None:
+        requested_start = source_start
+        if is_full_range:
+            day_start = requested_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            elapsed = (requested_start - day_start).total_seconds()
+            requested_start = day_start + timedelta(
+                seconds=(int(elapsed // resolution.total_seconds()) * resolution.total_seconds())
+            )
+    else:
+        requested_start = _coerce_datetime(start_date, parameter="start_date")
     horizon = (
         None
         if horizon_window is None
         else _coerce_duration(horizon_window, parameter="horizon_window", numeric_unit="days")
     )
-    requested_end = source_end + resolution if horizon is None else requested_start + horizon
+    if is_full_range:
+        source_day_start = source_end.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed_to_source_end = (source_end - source_day_start).total_seconds()
+        requested_end = source_day_start + timedelta(
+            seconds=(
+                int(elapsed_to_source_end // resolution.total_seconds()) + 1
+            )
+            * resolution.total_seconds()
+        )
+    else:
+        requested_end = requested_start + horizon  # type: ignore[operator]
 
-    starts_before_source = requested_start < source_start
-    ends_after_source = requested_end > (source_end + resolution if horizon is None else source_end)
+    starts_before_source = requested_start < source_start and not inferred_full_start
+    ends_after_source = (
+        False
+        if is_full_range
+        else requested_end > source_end
+    )
     if (starts_before_source or ends_after_source) and boundary_policy == "error":
         raise HorizonBoundaryError(
             f"Requested horizon [{_iso_datetime(requested_start)}, {_iso_datetime(requested_end)}) "
@@ -463,8 +489,12 @@ def extract_horizon(
             f"{_iso_datetime(source_end)}]."
         )
 
-    actual_start = max(requested_start, source_start)
-    available_end = source_end + resolution if horizon is None else source_end
+    actual_start = (
+        requested_start
+        if inferred_full_start
+        else max(requested_start, source_start)
+    )
+    available_end = requested_end if is_full_range else source_end
     actual_end = min(requested_end, available_end)
     if actual_end <= actual_start:
         raise HorizonBoundaryError("The requested horizon does not overlap the available dataset.")
@@ -500,7 +530,7 @@ def extract_horizon(
         "actual_end": _iso_datetime(aggregated_end),
         "source_start": _iso_datetime(source_start),
         "source_end": _iso_datetime(source_end),
-        "is_complete": not (starts_before_source or ends_after_source),
+        "is_complete": is_full_range or not (starts_before_source or ends_after_source),
         "truncated_prefix": (
             _iso_datetime(source_start)
             if starts_before_source and boundary_policy == "truncate"
@@ -518,13 +548,13 @@ def extract_horizon(
         for index in range(complete_intervals)
     ]
     return {
+        "evaluation_mode": "full_range" if is_full_range else "horizon_scoped",
         "start_date": boundary_metadata["actual_start"],
         "end_date": boundary_metadata["actual_end"],
         "requested_start_date": boundary_metadata["requested_start"],
         "requested_end_date": boundary_metadata["requested_end"],
-        "horizon_window": (
-            str(horizon) if horizon is not None else str(aggregated_end - actual_start)
-        ),
+        "horizon_window": str(horizon) if horizon is not None else None,
+        "evaluation_duration": str(aggregated_end - actual_start),
         "base_resolution": str(resolution),
         "base_resolution_seconds": resolution_seconds,
         "is_complete": boundary_metadata["is_complete"],
@@ -548,7 +578,7 @@ def evaluate_horizon(
     boundary_policy: str = "error",
     config: WindowSelectionConfig | None = None,
 ) -> dict[str, Any]:
-    """Evaluate candidate micro-windows within one temporal macro-horizon."""
+    """Evaluate candidates within a bounded horizon or the full dataset range."""
 
     if config is None:
         config = WindowSelectionConfig()
@@ -562,11 +592,15 @@ def evaluate_horizon(
         boundary_policy=boundary_policy,
     )
     counts = np.asarray(horizon["counts"], dtype=float)
-    suitability = check_data_suitability(
-        counts,
-        min_event_rate=config.min_event_rate,
-        max_zero_window_proportion=config.max_zero_window_proportion,
-    )
+    try:
+        suitability = check_data_suitability(
+            counts,
+            min_event_rate=config.min_event_rate,
+            max_zero_window_proportion=config.max_zero_window_proportion,
+        )
+    except DataSuitabilityError as exc:
+        mode = "Full-range" if horizon["evaluation_mode"] == "full_range" else "Horizon-scoped"
+        raise DataSuitabilityError(f"{mode} evaluation failed suitability screening: {exc}") from exc
     requested_candidates: list[int] = []
     for candidate in candidate_windows:
         try:
@@ -627,6 +661,24 @@ def evaluate_horizon(
         )
 
     accepted_candidates = [candidate for candidate in candidates if candidate["accepted"]]
+    ranked_candidates = rank_accepted_windows(accepted_candidates)
+    diagnostics: dict[str, Any] = {"global_non_stationarity_suspected": False}
+    if (
+        horizon["evaluation_mode"] == "full_range"
+        and not accepted_candidates
+        and any(
+            float(candidate["fano_factor"]) > float(candidate["fano_upper"])
+            for candidate in candidates
+        )
+    ):
+        diagnostics = {
+            "global_non_stationarity_suspected": True,
+            "message": (
+                "No full-range candidate was accepted because observed dispersion exceeded "
+                "the Poisson upper bound. Global non-stationarity may have inflated the "
+                "sample variance; evaluate bounded local macro-horizons with the two-stage workflow."
+            ),
+        }
     return {
         **horizon,
         "observed_event_rate": suitability["observed_event_rate"],
@@ -635,12 +687,226 @@ def evaluate_horizon(
         "suitability_diagnostics": suitability,
         "min_windows": config.min_windows,
         "confidence_level": config.confidence_level,
+        "requested_candidate_windows": requested_candidates,
         "candidate_windows": candidates,
         "valid_candidate_windows": valid_candidates,
         "rejected_candidate_windows": rejected_candidates,
         "accepted_windows": accepted_candidates,
+        "ranked_accepted_windows": ranked_candidates,
+        "selected_window": ranked_candidates[0] if ranked_candidates else None,
         "poisson_compatible_window_found": bool(accepted_candidates),
+        "diagnostics": diagnostics,
     }
+
+
+def rank_accepted_windows(
+    accepted_windows: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    *,
+    prefer_shorter_window: bool = True,
+) -> list[dict[str, Any]]:
+    """Rank accepted candidates by dispersion, precision, and window-width policy."""
+
+    ranked = [dict(candidate) for candidate in accepted_windows]
+    for candidate in ranked:
+        missing = {
+            key
+            for key in (
+                "window_size",
+                "fano_factor",
+                "confidence_band_width",
+            )
+            if key not in candidate
+        }
+        if missing:
+            raise ValueError(
+                "Accepted-window diagnostics are missing required fields: "
+                + ", ".join(sorted(missing))
+                + "."
+            )
+
+    direction = 1 if prefer_shorter_window else -1
+    ranked.sort(
+        key=lambda candidate: (
+            abs(float(candidate["fano_factor"]) - 1.0),
+            float(candidate["confidence_band_width"]),
+            direction * int(candidate["window_size"]),
+        )
+    )
+    return ranked
+
+
+def build_arrival_intensity_series(
+    data: str | Path | Sequence[datetime | Mapping[str, Any]] | Iterable[datetime | Mapping[str, Any]],
+    *,
+    window_size: int,
+    start_date: datetime | date | str | None = None,
+    horizon_window: timedelta | int | float | str | None = None,
+    datetime_column: str = "timestamp",
+    count_column: str | None = None,
+    base_resolution: timedelta | int | float | str = "1h",
+    boundary_policy: str = "error",
+    rate_unit: str = "hour",
+) -> dict[str, Any]:
+    """Build chronological non-overlapping arrival rates for a selected window."""
+
+    if isinstance(window_size, bool) or not isinstance(window_size, (int, np.integer)):
+        raise ValueError("window_size must be a positive integer.")
+    if window_size <= 0:
+        raise ValueError("window_size must be a positive integer.")
+
+    horizon = extract_horizon(
+        data,
+        start_date=start_date,
+        horizon_window=horizon_window,
+        datetime_column=datetime_column,
+        count_column=count_column,
+        base_resolution=base_resolution,
+        boundary_policy=boundary_policy,
+    )
+    counts = np.asarray(horizon["counts"], dtype=float)
+    aggregated = aggregate_counts_by_window(counts, int(window_size))
+    complete_windows = len(aggregated)
+    window_duration_seconds = float(horizon["base_resolution_seconds"]) * int(window_size)
+    rate_units = {
+        "second": 1.0,
+        "minute": 60.0,
+        "hour": 3600.0,
+        "day": 86400.0,
+    }
+    if rate_unit not in rate_units:
+        raise ValueError("rate_unit must be one of: second, minute, hour, day.")
+    normalizer = window_duration_seconds / rate_units[rate_unit]
+    rows = [
+        {
+            "window_start": horizon["interval_starts"][
+                index * int(window_size)
+            ].isoformat(timespec="seconds"),
+            "window_midpoint": (
+                horizon["interval_starts"][index * int(window_size)]
+                + timedelta(seconds=window_duration_seconds / 2.0)
+            ).isoformat(timespec="seconds"),
+            "arrival_intensity": float(value / normalizer),
+        }
+        for index, value in enumerate(aggregated)
+    ]
+    return {
+        "evaluation_mode": horizon["evaluation_mode"],
+        "start_date": horizon["start_date"],
+        "end_date": horizon["end_date"],
+        "window_size": int(window_size),
+        "base_resolution": horizon["base_resolution"],
+        "sampling_period_seconds": window_duration_seconds,
+        "sampling_period": str(timedelta(seconds=window_duration_seconds)),
+        "intensity_unit": f"arrivals per {rate_unit}",
+        "number_of_complete_windows": complete_windows,
+        "remainder_base_intervals": len(counts) - complete_windows * int(window_size),
+        "rows": rows,
+        "columns": ["window_start", "window_midpoint", "arrival_intensity"],
+    }
+
+
+def save_tseda_arrival_intensity_series(
+    data: str | Path | Sequence[datetime | Mapping[str, Any]] | Iterable[datetime | Mapping[str, Any]],
+    *,
+    window_size: int,
+    output_path: str | Path,
+    start_date: datetime | date | str | None = None,
+    horizon_window: timedelta | int | float | str | None = None,
+    datetime_column: str = "timestamp",
+    count_column: str | None = None,
+    base_resolution: timedelta | int | float | str = "1h",
+    boundary_policy: str = "error",
+    rate_unit: str = "hour",
+) -> dict[str, Any]:
+    """Save one selected-window intensity trajectory as a TSEDA two-column CSV."""
+
+    summary = build_arrival_intensity_series(
+        data,
+        window_size=window_size,
+        start_date=start_date,
+        horizon_window=horizon_window,
+        datetime_column=datetime_column,
+        count_column=count_column,
+        base_resolution=base_resolution,
+        boundary_policy=boundary_policy,
+        rate_unit=rate_unit,
+    )
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["window_midpoint", "arrival_intensity"])
+        for row in summary["rows"]:
+            writer.writerow([row["window_midpoint"], row["arrival_intensity"]])
+    return {
+        **summary,
+        "output_file": str(destination),
+        "timestamp_coordinate": "window_midpoint",
+        "columns": ["window_midpoint", "arrival_intensity"],
+        "number_of_exported_rows": len(summary["rows"]),
+    }
+
+
+def plot_arrival_intensity(
+    intensity_series: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    *,
+    output_path: str | Path | None = None,
+    title: str | None = None,
+    show: bool = False,
+) -> Any:
+    """Plot a chronological arrival-intensity series and optionally save it."""
+
+    if isinstance(intensity_series, Mapping):
+        raw_rows = intensity_series.get("rows")
+        if raw_rows is None:
+            raise ValueError("The intensity-series mapping must contain a 'rows' field.")
+        intensity_unit = intensity_series.get("intensity_unit", "arrivals per time unit")
+        rows = list(raw_rows)
+    else:
+        rows = list(intensity_series)
+        intensity_unit = "arrivals per time unit"
+    if not rows:
+        raise ValueError("The arrival-intensity series is empty.")
+    try:
+        time_coordinate = (
+            "window_midpoint"
+            if "window_midpoint" in rows[0]
+            else "window_start"
+        )
+        window_starts = [
+            datetime.fromisoformat(str(row[time_coordinate])) for row in rows
+        ]
+        intensities = [float(row["arrival_intensity"]) for row in rows]
+    except KeyError as exc:
+        raise ValueError(
+            "Each intensity row must contain window_start/window_midpoint and arrival_intensity."
+        ) from exc
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError(
+            "plot_arrival_intensity requires matplotlib; install the project dev dependencies."
+        ) from exc
+
+    figure, axis = plt.subplots(figsize=(12, 4.5))
+    axis.plot(window_starts, intensities, marker="o", linewidth=1.5, markersize=3)
+    axis.set_title(title or "Arrival Intensity Variation Over Time")
+    axis.set_xlabel(
+        "Window midpoint" if time_coordinate == "window_midpoint" else "Window start"
+    )
+    axis.set_ylabel(str(intensity_unit))
+    axis.grid(alpha=0.25)
+    figure.autofmt_xdate()
+    figure.tight_layout()
+
+    if output_path is not None:
+        destination = Path(output_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, dpi=160, bbox_inches="tight")
+    if show:
+        plt.show()
+    return figure
 
 
 def tune_horizon_windows(
